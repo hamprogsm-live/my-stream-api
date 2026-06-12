@@ -4,6 +4,14 @@ from flask import Flask, Response, stream_with_context
 
 app = Flask(__name__)
 
+# تفعيل تصاريح CORS يدوياً لضمان قبول طلبات تطبيق AppCreator24
+@app.after_request
+def add_cors_headers(response):
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    return response
+
 BASE_URL = "http://atk97.online:80"
 MAC_ADDRESS = "00:1A:79:0D:0F:7B"
 USER_AGENT_MAG = "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 sb_api_version=6 EmbeddedLinux Tasman IPTV navigator"
@@ -20,9 +28,9 @@ HEADERS = {
 
 @app.route('/')
 def home():
-    return "IPTV Proxy Server for AppCreator24 is Running!"
+    return "IPTV Proxy Server for AppCreator24 is fully active with CORS enabled!"
 
-# 1. جلب قائمة القنوات وتوجيهها للبروكسي
+# 1. جلب قائمة القنوات
 @app.route('/playlist.m3u')
 def get_playlist():
     session = requests.Session()
@@ -62,19 +70,18 @@ def get_playlist():
     except Exception as e:
         return f"Error: {e}", 500
 
-# 2. تمرير دفق الفيديو مع فرض الـ Headers من السيرفر السحابي مباشرة (هذا ما يحتاجه التطبيق)
+# 2. تمرير البث المباشر (동기화) المتوافق مع مشغلات الأندرويد
 @app.route('/live/<stream_id>.ts')
 def stream_channel(stream_id):
     stream_url = f"{BASE_URL}/play/live.php?mac={MAC_ADDRESS}&stream={stream_id}&extension=ts"
     
     def generate():
-        # استخدام تكنولوجيا حث الدفق لمنع الانقطاع وسط البث داخل التطبيق
-        with requests.get(stream_url, headers=HEADERS, stream=True, timeout=15) as r:
-            # تكبير حجم الـ Chunk إلى 16 كيلوبايت لتوفير تدفق سلس ومستقر بدون تشنج
-            for chunk in r.iter_content(chunk_size=16384):
-                if chunk:
-                    yield chunk
-                    
+        # استخدام نفس آلية التمرير المستقرة التي اعتمدنا عليها سابقاً في البروكسي الآخر
+        req = requests.get(stream_url, headers=HEADERS, stream=True, timeout=15)
+        for chunk in req.iter_content(chunk_size=8192):
+            if chunk:
+                yield chunk
+                
     return Response(stream_with_context(generate()), content_type='video/mp2t')
 
 if __name__ == '__main__':
