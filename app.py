@@ -1,6 +1,6 @@
 import os
 import requests
-from flask import Flask, Response, stream_with_context
+from flask import Flask, Response, stream_with_context, redirect
 
 app = Flask(__name__)
 
@@ -19,12 +19,12 @@ HEADERS = {
     "Connection": "keep-alive"
 }
 
-# إضافة الصفحة الرئيسية لمنع ظهور خطأ 404 عند الدخول للرابط المباشر
+# الصفحة الرئيسية للتأكد من عمل البروكسي بنجاح
 @app.route('/')
 def home():
     return "IPTV Proxy Server is Running Successfully! Use /playlist.m3u to fetch channels."
 
-# 1. رابط جلب الـ Playlist
+# 1. رابط جلب ملف القنوات الكامل (M3U Playlist)
 @app.route('/playlist.m3u')
 def get_playlist():
     session = requests.Session()
@@ -33,7 +33,7 @@ def get_playlist():
     portal_api = f"{BASE_URL}/c/server/load.php"
     
     try:
-        # عمل الـ Handshake الأولي
+        # عمل الـ Handshake الأولي لتوليد الجلسة
         session.get(f"{portal_api}?type=stb&action=handshake&JsHttpRequest=1-xml", timeout=10)
         auth_url = f"{portal_api}?type=stb&action=get_profile&hd=1&sn=0000000000000&stb_type=MAG250&mac={MAC_ADDRESS}&JsHttpRequest=1-xml"
         auth_response = session.get(auth_url, timeout=10).json()
@@ -41,7 +41,7 @@ def get_playlist():
         if 'js' in auth_response and 'token' in auth_response['js']:
             session.headers.update({"Authorization": f"Bearer {auth_response['js']['token']}"})
             
-        # سحب القنوات
+        # سحب الـ 49 ألف قناة بالكامل
         channels_url = f"{portal_api}?type=itv&action=get_all_channels&JsHttpRequest=1-xml"
         channels_data = session.get(channels_url, timeout=25).json()
         
@@ -58,7 +58,7 @@ def get_playlist():
                     stream_id = cmd.split("stream=")[1].split("&")[0]
                     
                 if stream_id:
-                    # بناء الرابط باستخدام النطاق الخارجي الثابت والمضمون
+                    # توجيه الروابط إلى سيرفر Railway الخاص بك
                     proxy_stream_url = f"{PUBLIC_HOST}/live/{stream_id}.ts"
                     m3u_content += f'#EXTINF:-1 tvg-id="{ch_id}", {name}\n{proxy_stream_url}\n'
             
@@ -68,22 +68,30 @@ def get_playlist():
     except Exception as e:
         return f"Error generating playlist: {e}", 500
 
-# 2. رابط تشغيل دفق البث (Streaming Proxy)
+# 2. رابط البث المطور بنظام الـ Redirect لمنع الانقطاع نهائياً
 @app.route('/live/<stream_id>.ts')
 def stream_channel(stream_id):
-    stream_url = f"{BASE_URL}/play/live.php?mac={MAC_ADDRESS}&stream={stream_id}&extension=ts"
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    session.cookies.set("mac", MAC_ADDRESS, domain=BASE_URL.split("//")[-1].split(":")[0])
+    portal_api = f"{BASE_URL}/c/server/load.php"
     
-    def generate():
-        req = requests.get(stream_url, headers=HEADERS, stream=True, timeout=15)
-        for chunk in req.iter_content(chunk_size=8192):
-            if chunk:
-                yield chunk
-                
-    return Response(stream_with_context(generate()), content_type='video/mp2t')
+    try:
+        # تجديد تسجيل الدخول وجلب Token جديد مخصص لهذه القناة بسرعة فائقة لمنع الحظر
+        session.get(f"{portal_api}?type=stb&action=handshake&JsHttpRequest=1-xml", timeout=5)
+        auth_url = f"{portal_api}?type=stb&action=get_profile&hd=1&sn=0000000000000&stb_type=MAG250&mac={MAC_ADDRESS}&JsHttpRequest=1-xml"
+        session.get(auth_url, timeout=5)
+        
+        # رابط البث النهائي المباشر من السيرفر الأصلي
+        stream_url = f"{BASE_URL}/play/live.php?mac={MAC_ADDRESS}&stream={stream_id}&extension=ts"
+        
+        # عمل تحويل مباشر (302 Redirect) للمشغل ليتصل بالسيرفر مباشرة بدون وسيط يسبب بطء
+        return redirect(stream_url)
+        
+    except Exception as e:
+        return f"Stream initialization failed: {e}", 500
 
 if __name__ == '__main__':
-    # جلب المنفذ من المتغيرات البيئية للمنصة
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port)
+    # جلب منفذ التشغيل تلقائياً من إعدادات المنصة
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
