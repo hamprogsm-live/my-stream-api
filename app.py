@@ -4,7 +4,7 @@ from flask import Flask, Response, stream_with_context, render_template_string
 
 app = Flask(__name__)
 
-# تفعيل تصاريح CORS كاملة
+# فتح تصاريح CORS بالكامل لمنع المتصفح من حظر دفق البث
 @app.after_request
 def add_cors_headers(response):
     response.headers["Access-Control-Allow-Origin"] = "*"
@@ -28,9 +28,9 @@ HEADERS = {
 
 @app.route('/')
 def home():
-    return "IPTV Proxy Server with Web Player Support is Active!"
+    return "IPTV Proxy Server for AppCreator24 is up and running!"
 
-# 1. جلب القنوات
+# 1. جلب ملف الـ M3U
 @app.route('/playlist.m3u')
 def get_playlist():
     session = requests.Session()
@@ -61,7 +61,6 @@ def get_playlist():
                     stream_id = cmd.split("stream=")[1].split("&")[0]
                     
                 if stream_id:
-                    # تحويل صيغة الرابط في الملف ليكون متوافقاً مع مشغلات الويب الحديثة
                     proxy_stream_url = f"{PUBLIC_HOST}/live/{stream_id}.m3u8"
                     m3u_content += f'#EXTINF:-1 tvg-id="{ch_id}", {name}\n{proxy_stream_url}\n'
             
@@ -71,22 +70,21 @@ def get_playlist():
     except Exception as e:
         return f"Error: {e}", 500
 
-# 2. دفق الفيديو بخدعة صيغة الـ M3U8 للمتصفحات والأندرويد
+# 2. دفق الفيديو المباشر المستقر للتطبيقات
 @app.route('/live/<stream_id>.m3u8')
 def stream_channel(stream_id):
-    # السيرفر الأصلي يطلب .ts، لكننا نمرره للمستخدم بصيغة m3u8 لخداع المشغل الداخلي
     stream_url = f"{BASE_URL}/play/live.php?mac={MAC_ADDRESS}&stream={stream_id}&extension=ts"
     
     def generate():
+        # تمرير دفق الفيديو مع زيادة حجم الـ Chunk لضمان عدم توقف الصورة
         req = requests.get(stream_url, headers=HEADERS, stream=True, timeout=15)
-        for chunk in req.iter_content(chunk_size=16384):
+        for chunk in req.iter_content(chunk_size=32768):
             if chunk:
                 yield chunk
                 
-    # إرسال البيانات بنوع Content-Type الخاص بالبث المباشر المعتمد من أندرويد وجميع المتصفحات
     return Response(stream_with_context(generate()), content_type='application/x-mpegURL')
 
-# 3. صفحة مشغل الويب HTML5 المتكاملة والذكية لتطبيقك (تستخدم مكتبة الـ VideoJS العاليمة)
+# 3. صفحة مشغل الويب المحدثة بمكتبة hls.js الاحترافية (تفك التشفير تلقائياً وتصلح الشاشة السوداء)
 @app.route('/player/<stream_id>')
 def player_page(stream_id):
     stream_url = f"{PUBLIC_HOST}/live/{stream_id}.m3u8"
@@ -97,24 +95,39 @@ def player_page(stream_id):
     <head>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Live Player</title>
-        <link href="https://vjs.zencdn.net/8.10.0/video-js.css" rel="stylesheet" />
-        <script src="https://vjs.zencdn.net/8.10.0/video.min.js"></script>
+        <title>Live Stream Player</title>
+        <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
         <style>
-            body, html { margin: 0; padding: 0; width: 100%; height: 100%; background: #000; overflow: hidden; }
-            .video-js { width: 100% !important; height: 100% !important; }
+            body, html { margin: 0; padding: 0; width: 100%; height: 100%; background: #000; overflow: hidden; display: flex; justify-content: center; align-items: center; }
+            video { width: 100%; height: 100%; object-fit: contain; }
         </style>
     </head>
     <body>
-        <video id="my-video" class="video-js vjs-default-skin vjs-big-play-centered" 
-               controls preload="auto" autoplay playsinline muted data-setup="{}">
-            <source src="{{ stream_url }}" type="application/x-mpegURL">
-        </video>
+        <video id="video" controls autoplay playsinline muted></video>
         <script>
-            var player = videojs('my-video');
-            player.ready(function() {
-                player.play();
-            });
+            var video = document.getElementById('video');
+            var videoSrc = '{{ stream_url }}';
+            
+            if (Hls.isSupported()) {
+                var hls = new Hls({
+                    maxBufferSize: 0, // تصفير البافر لتشغيل البث بأسرع وقت
+                    maxBufferLength: 10,
+                    liveSyncDurationCount: 3
+                });
+                hls.loadSource(videoSrc);
+                hls.attachMedia(video);
+                hls.on(Hls.Events.MANIFEST_PARSED, function() {
+                    video.play().catch(function(error) {
+                        console.log("Autoplay prevented, waiting for user interaction");
+                    });
+                });
+            }
+            else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                video.src = videoSrc;
+                video.addEventListener('loadedmetadata', function() {
+                    video.play();
+                });
+            }
         </script>
     </body>
     </html>
