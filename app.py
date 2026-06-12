@@ -83,7 +83,42 @@ def stream_channel(stream_id):
                 yield chunk
                 
     return Response(stream_with_context(generate()), content_type='video/mp2t')
-
+@app.route('/player/<stream_id>')
+def player_page(stream_id):
+    # رابط البث القادم من البروكسي الخاص بك
+    stream_url = f"{PUBLIC_HOST}/live/{stream_id}.ts"
+    
+    # صفحة HTML5 تحتوي على مشغل Clappr الاحترافي المتوافق مع الأندرويد والتطبيقات
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Live Stream</title>
+        <script type="text/javascript" src="https://cdn.jsdelivr.net/npm/clappr@latest/dist/clappr.min.js"></script>
+        <style>
+            body, html {{ margin: 0; padding: 0; width: 100%; height: 100%; background-color: #000; overflow: hidden; }}
+            #player {{ width: 100%; height: 100%; }}
+        </style>
+    </head>
+    <body>
+        <div id="player"></div>
+        <script>
+            var player = new Clappr.Player({{
+                source: "{stream_url}",
+                parentId: "#player",
+                preload: "auto",
+                autoPlay: true,
+                width: "100%",
+                height: "100%",
+                mimeType: "video/mp2t"
+            }});
+        </script>
+    </body>
+    </html>
+    """
+    return html_content
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
