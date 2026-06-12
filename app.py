@@ -1,10 +1,10 @@
 import os
 import requests
-from flask import Flask, Response, stream_with_context
+from flask import Flask, Response, stream_with_context, render_template_string
 
 app = Flask(__name__)
 
-# تفعيل تصاريح CORS يدوياً لضمان قبول طلبات تطبيق AppCreator24
+# تفعيل تصاريح CORS كاملة
 @app.after_request
 def add_cors_headers(response):
     response.headers["Access-Control-Allow-Origin"] = "*"
@@ -28,9 +28,9 @@ HEADERS = {
 
 @app.route('/')
 def home():
-    return "IPTV Proxy Server for AppCreator24 is fully active with CORS enabled!"
+    return "IPTV Proxy Server with Web Player Support is Active!"
 
-# 1. جلب قائمة القنوات
+# 1. جلب القنوات
 @app.route('/playlist.m3u')
 def get_playlist():
     session = requests.Session()
@@ -61,7 +61,8 @@ def get_playlist():
                     stream_id = cmd.split("stream=")[1].split("&")[0]
                     
                 if stream_id:
-                    proxy_stream_url = f"{PUBLIC_HOST}/live/{stream_id}.ts"
+                    # تحويل صيغة الرابط في الملف ليكون متوافقاً مع مشغلات الويب الحديثة
+                    proxy_stream_url = f"{PUBLIC_HOST}/live/{stream_id}.m3u8"
                     m3u_content += f'#EXTINF:-1 tvg-id="{ch_id}", {name}\n{proxy_stream_url}\n'
             
             return Response(m3u_content, mimetype='audio/x-mpegurl')
@@ -70,55 +71,56 @@ def get_playlist():
     except Exception as e:
         return f"Error: {e}", 500
 
-# 2. تمرير البث المباشر (동기화) المتوافق مع مشغلات الأندرويد
-@app.route('/live/<stream_id>.ts')
+# 2. دفق الفيديو بخدعة صيغة الـ M3U8 للمتصفحات والأندرويد
+@app.route('/live/<stream_id>.m3u8')
 def stream_channel(stream_id):
+    # السيرفر الأصلي يطلب .ts، لكننا نمرره للمستخدم بصيغة m3u8 لخداع المشغل الداخلي
     stream_url = f"{BASE_URL}/play/live.php?mac={MAC_ADDRESS}&stream={stream_id}&extension=ts"
     
     def generate():
-        # استخدام نفس آلية التمرير المستقرة التي اعتمدنا عليها سابقاً في البروكسي الآخر
         req = requests.get(stream_url, headers=HEADERS, stream=True, timeout=15)
-        for chunk in req.iter_content(chunk_size=8192):
+        for chunk in req.iter_content(chunk_size=16384):
             if chunk:
                 yield chunk
                 
-    return Response(stream_with_context(generate()), content_type='video/mp2t')
+    # إرسال البيانات بنوع Content-Type الخاص بالبث المباشر المعتمد من أندرويد وجميع المتصفحات
+    return Response(stream_with_context(generate()), content_type='application/x-mpegURL')
+
+# 3. صفحة مشغل الويب HTML5 المتكاملة والذكية لتطبيقك (تستخدم مكتبة الـ VideoJS العاليمة)
 @app.route('/player/<stream_id>')
 def player_page(stream_id):
-    # رابط البث القادم من البروكسي الخاص بك
-    stream_url = f"{PUBLIC_HOST}/live/{stream_id}.ts"
+    stream_url = f"{PUBLIC_HOST}/live/{stream_id}.m3u8"
     
-    # صفحة HTML5 تحتوي على مشغل Clappr الاحترافي المتوافق مع الأندرويد والتطبيقات
-    html_content = f"""
+    html_template = """
     <!DOCTYPE html>
     <html>
     <head>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Live Stream</title>
-        <script type="text/javascript" src="https://cdn.jsdelivr.net/npm/clappr@latest/dist/clappr.min.js"></script>
+        <title>Live Player</title>
+        <link href="https://vjs.zencdn.net/8.10.0/video-js.css" rel="stylesheet" />
+        <script src="https://vjs.zencdn.net/8.10.0/video.min.js"></script>
         <style>
-            body, html {{ margin: 0; padding: 0; width: 100%; height: 100%; background-color: #000; overflow: hidden; }}
-            #player {{ width: 100%; height: 100%; }}
+            body, html { margin: 0; padding: 0; width: 100%; height: 100%; background: #000; overflow: hidden; }
+            .video-js { width: 100% !important; height: 100% !important; }
         </style>
     </head>
     <body>
-        <div id="player"></div>
+        <video id="my-video" class="video-js vjs-default-skin vjs-big-play-centered" 
+               controls preload="auto" autoplay playsinline muted data-setup="{}">
+            <source src="{{ stream_url }}" type="application/x-mpegURL">
+        </video>
         <script>
-            var player = new Clappr.Player({{
-                source: "{stream_url}",
-                parentId: "#player",
-                preload: "auto",
-                autoPlay: true,
-                width: "100%",
-                height: "100%",
-                mimeType: "video/mp2t"
-            }});
+            var player = videojs('my-video');
+            player.ready(function() {
+                player.play();
+            });
         </script>
     </body>
     </html>
     """
-    return html_content
+    return render_template_string(html_template, stream_url=stream_url)
+
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
