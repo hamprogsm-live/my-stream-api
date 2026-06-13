@@ -4,7 +4,7 @@ from flask import Flask, Response, stream_with_context
 
 app = Flask(__name__)
 
-# تفعيل تصاريح CORS كاملة لإزالة قيود الأندرويد
+# تفعيل تصاريح CORS كاملة لمنع أي تعارض مع التطبيقات
 @app.after_request
 def add_cors_headers(response):
     response.headers["Access-Control-Allow-Origin"] = "*"
@@ -14,8 +14,10 @@ def add_cors_headers(response):
 
 BASE_URL = "http://bolachas.live:80"
 MAC_ADDRESS = "00:1A:79:c3:de:a5"
-USER_AGENT_MAG = "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 sb_api_version=6 EmbeddedLinux Tasman IPTV navigator"
+# الـ Token السري المأخوذ من بيانات حسابك لفتح التشفير عن القنوات
+PLAY_TOKEN = "NTqnQ4ORwX" 
 
+USER_AGENT_MAG = "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 sb_api_version=6 EmbeddedLinux Tasman IPTV navigator"
 PUBLIC_HOST = "https://my-stream-api-production.up.railway.app"
 
 HEADERS = {
@@ -28,9 +30,9 @@ HEADERS = {
 
 @app.route('/')
 def home():
-    return "Bolachas Proxy for AppCreator24 Internal Player is Active!"
+    return "Bolachas Secured Proxy Server is Active!"
 
-# 1. جلب قائمة القنوات وتحويل امتداداتها إلى m3u8 لخداع التطبيق
+# 1. جلب قائمة القنوات
 @app.route('/playlist.m3u')
 def get_playlist():
     session = requests.Session()
@@ -61,28 +63,28 @@ def get_playlist():
                     stream_id = cmd.split("stream=")[1].split("&")[0]
                     
                 if stream_id:
-                    # غيرنا الامتداد هنا إلى .m3u8 لإقناع مشغل AppCreator24 بالدخول للقناة
+                    # تزويد التطبيق بامتداد .m3u8 المخادع للتشغيل الداخلي
                     proxy_stream_url = f"{PUBLIC_HOST}/live/{stream_id}.m3u8"
                     m3u_content += f'#EXTINF:-1 tvg-id="{ch_id}", {name}\n{proxy_stream_url}\n'
             
             return Response(m3u_content, mimetype='audio/x-mpegurl')
         else:
-            return "No channels found", 500
+            return "No channels found. Check account status.", 500
     except Exception as e:
         return f"Error: {e}", 500
 
-# 2. استقبال طلب الـ m3u8 وتمرير داتا الـ ts الحقيقية بنوع هيدر متوافق مع أندرويد
+# 2. تمرير دفق البث المباشر مدمجاً معه الـ Play Token لحل مشكلة التوقف
 @app.route('/live/<stream_id>.m3u8')
 def stream_channel(stream_id):
-    stream_url = f"{BASE_URL}/play/live.php?mac={MAC_ADDRESS}&stream={stream_id}&extension=ts"
+    # إضافة الـ play_token في نهاية الرابط الأصلي لإجبار السيرفر على فتح البث فوراً وتخطي الحظر
+    stream_url = f"{BASE_URL}/play/live.php?mac={MAC_ADDRESS}&stream={stream_id}&extension=ts&play_token={PLAY_TOKEN}"
     
     def generate():
         req = requests.get(stream_url, headers=HEADERS, stream=True, timeout=20)
-        for chunk in req.iter_content(chunk_size=32768): # حجم دفق كبير لثبات البث الداخلي
+        for chunk in req.iter_content(chunk_size=16384):
             if chunk:
                 yield chunk
                 
-    # الخدعة هنا: نرسل داتا الـ ts ولكن بهيدر ترفيهي ونوع ميما يقرأه مشغل التطبيق على أنه HLS
     return Response(stream_with_context(generate()), content_type='application/x-mpegURL')
 
 if __name__ == '__main__':
