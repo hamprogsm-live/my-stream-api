@@ -4,7 +4,7 @@ from flask import Flask, Response, stream_with_context
 
 app = Flask(__name__)
 
-# فتح تصاريح CORS كاملة لمنع أي تعارض
+# تفعيل تصاريح CORS كاملة لإزالة قيود الأندرويد
 @app.after_request
 def add_cors_headers(response):
     response.headers["Access-Control-Allow-Origin"] = "*"
@@ -12,7 +12,6 @@ def add_cors_headers(response):
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
     return response
 
-# البيانات الجديدة المستخرجة من البورتال الخاص بك
 BASE_URL = "http://bolachas.live:80"
 MAC_ADDRESS = "00:1A:79:c3:de:a5"
 USER_AGENT_MAG = "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 sb_api_version=6 EmbeddedLinux Tasman IPTV navigator"
@@ -29,9 +28,9 @@ HEADERS = {
 
 @app.route('/')
 def home():
-    return "New Bolachas IPTV Proxy Server is fully Active!"
+    return "Bolachas Proxy for AppCreator24 Internal Player is Active!"
 
-# 1. جلب قائمة القنوات الكاملة (M3U Playlist)
+# 1. جلب قائمة القنوات وتحويل امتداداتها إلى m3u8 لخداع التطبيق
 @app.route('/playlist.m3u')
 def get_playlist():
     session = requests.Session()
@@ -40,7 +39,6 @@ def get_playlist():
     portal_api = f"{BASE_URL}/c/server/load.php"
     
     try:
-        # تسجيل الدخول وتوليد الجلسة
         session.get(f"{portal_api}?type=stb&action=handshake&JsHttpRequest=1-xml", timeout=12)
         auth_url = f"{portal_api}?type=stb&action=get_profile&hd=1&sn=0000000000000&stb_type=MAG250&mac={MAC_ADDRESS}&JsHttpRequest=1-xml"
         auth_response = session.get(auth_url, timeout=12).json()
@@ -48,7 +46,6 @@ def get_playlist():
         if 'js' in auth_response and 'token' in auth_response['js']:
             session.headers.update({"Authorization": f"Bearer {auth_response['js']['token']}"})
             
-        # جلب القنوات
         channels_url = f"{portal_api}?type=itv&action=get_all_channels&JsHttpRequest=1-xml"
         channels_data = session.get(channels_url, timeout=30).json()
         
@@ -64,30 +61,29 @@ def get_playlist():
                     stream_id = cmd.split("stream=")[1].split("&")[0]
                     
                 if stream_id:
-                    # توجيه رابط القناة إلى سيرفرك على Railway بصيغة .ts
-                    proxy_stream_url = f"{PUBLIC_HOST}/live/{stream_id}.ts"
+                    # غيرنا الامتداد هنا إلى .m3u8 لإقناع مشغل AppCreator24 بالدخول للقناة
+                    proxy_stream_url = f"{PUBLIC_HOST}/live/{stream_id}.m3u8"
                     m3u_content += f'#EXTINF:-1 tvg-id="{ch_id}", {name}\n{proxy_stream_url}\n'
             
             return Response(m3u_content, mimetype='audio/x-mpegurl')
         else:
-            return "No channels found from the new server.", 500
+            return "No channels found", 500
     except Exception as e:
-        return f"Error generating playlist: {e}", 500
+        return f"Error: {e}", 500
 
-# 2. تمرير البث المباشر الذكي مع تجديد الجلسة تلقائياً لمنع الحظر
-@app.route('/live/<stream_id>.ts')
+# 2. استقبال طلب الـ m3u8 وتمرير داتا الـ ts الحقيقية بنوع هيدر متوافق مع أندرويد
+@app.route('/live/<stream_id>.m3u8')
 def stream_channel(stream_id):
-    # نستخدم نفس الكوكي والهيدرز الموثوقة للبث المباشر
     stream_url = f"{BASE_URL}/play/live.php?mac={MAC_ADDRESS}&stream={stream_id}&extension=ts"
     
     def generate():
-        # تمرير دفق البيانات بحجم تجميعي متوسط ومستقر جداً للـ VLC والمشغلات الخارجية
         req = requests.get(stream_url, headers=HEADERS, stream=True, timeout=20)
-        for chunk in req.iter_content(chunk_size=16384):
+        for chunk in req.iter_content(chunk_size=32768): # حجم دفق كبير لثبات البث الداخلي
             if chunk:
                 yield chunk
                 
-    return Response(stream_with_context(generate()), content_type='video/mp2t')
+    # الخدعة هنا: نرسل داتا الـ ts ولكن بهيدر ترفيهي ونوع ميما يقرأه مشغل التطبيق على أنه HLS
+    return Response(stream_with_context(generate()), content_type='application/x-mpegURL')
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
