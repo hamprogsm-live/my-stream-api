@@ -1,7 +1,84 @@
 import os
-from flask import Flask, render_template_string, make_response
+import time
+import requests
+from datetime import datetime
+from flask import Flask, render_template_string, make_response, jsonify, request
 
 app = Flask(__name__)
+
+# ==============================
+# إعدادات API-FOOTBALL
+# ==============================
+# يفضل وضع المفتاح كمتغير بيئة (Environment Variable) باسم API_FOOTBALL_KEY
+# بدلاً من كتابته مباشرة في الكود، لكن تم توفير قيمة افتراضية هنا للتجربة السريعة.
+API_FOOTBALL_KEY = os.environ.get("API_FOOTBALL_KEY", "e443b3250a452e23de6a392ea2b22d75")
+API_FOOTBALL_BASE_URL = "https://v3.football.api-sports.io"
+
+# البطولات الكبرى فقط (يمكنك إضافة/حذف حسب رغبتك)
+# مصدر المعرفات: https://www.api-football.com/documentation-v3#tag/Leagues
+MAJOR_LEAGUES = {
+    1: "كأس العالم",
+    2: "دوري أبطال أوروبا",
+    3: "الدوري الأوروبي",
+    39: "الدوري الإنجليزي الممتاز",
+    140: "الدوري الإسباني",
+    135: "الدوري الإيطالي",
+    78: "الدوري الألماني",
+    61: "الدوري الفرنسي",
+    45: "كأس الاتحاد الإنجليزي",
+    848: "دوري المؤتمر الأوروبي",
+}
+
+# ==============================
+# كاش بسيط في الذاكرة (In-memory cache)
+# ==============================
+_matches_cache = {"data": None, "timestamp": 0}
+CACHE_TTL_SECONDS = 300  # 5 دقائق
+
+
+def fetch_today_major_matches():
+    """يجلب كل مباريات اليوم من API-FOOTBALL ثم يفلتر على البطولات الكبرى فقط."""
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    headers = {"x-apisports-key": API_FOOTBALL_KEY}
+    resp = requests.get(
+        f"{API_FOOTBALL_BASE_URL}/fixtures",
+        headers=headers,
+        params={"date": today},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    payload = resp.json()
+
+    matches = []
+    for fixture in payload.get("response", []):
+        league_id = fixture["league"]["id"]
+        if league_id not in MAJOR_LEAGUES:
+            continue
+
+        status = fixture["fixture"]["status"]
+        matches.append({
+            "id": fixture["fixture"]["id"],
+            "date": fixture["fixture"]["date"],
+            "timestamp": fixture["fixture"]["timestamp"],
+            "status_short": status["short"],       # e.g. NS, 1H, HT, FT, LIVE
+            "status_long": status["long"],
+            "elapsed": status["elapsed"],
+            "home_team": fixture["teams"]["home"]["name"],
+            "away_team": fixture["teams"]["away"]["name"],
+            "home_logo": fixture["teams"]["home"]["logo"],
+            "away_logo": fixture["teams"]["away"]["logo"],
+            "home_score": fixture["goals"]["home"],
+            "away_score": fixture["goals"]["away"],
+            "league_id": league_id,
+            "league_name": MAJOR_LEAGUES[league_id],
+            "league_logo": fixture["league"]["logo"],
+            "round": fixture["league"]["round"],
+        })
+
+    # ترتيب حسب التوقيت
+    matches.sort(key=lambda m: m["timestamp"])
+    return matches
 
 # بيانات المباريات مطابقة تماماً للصور التي رفعتها
 MATCHES_DATA = [
@@ -180,7 +257,59 @@ def index():
     
     return response
 
-import os
+
+@app.route('/api/matches')
+def api_matches():
+    """
+    يرجع مباريات اليوم للبطولات الكبرى فقط (كأس العالم، أبطال أوروبا، الدوريات الكبرى...).
+    نتائج مخزنة مؤقتاً (كاش) لمدة CACHE_TTL_SECONDS لتقليل عدد الطلبات على API-FOOTBALL.
+    استخدم ?refresh=1 لإجبار تحديث الكاش.
+    """
+    now = time.time()
+    force_refresh = request.args.get("refresh") == "1"
+    cache_is_fresh = (
+        _matches_cache["data"] is not None
+        and (now - _matches_cache["timestamp"]) < CACHE_TTL_SECONDS
+    )
+
+    if not force_refresh and cache_is_fresh:
+        return jsonify({
+            "success": True,
+            "cached": True,
+            "cached_at": _matches_cache["timestamp"],
+            "count": len(_matches_cache["data"]),
+            "matches": _matches_cache["data"],
+        })
+
+    try:
+        matches = fetch_today_major_matches()
+        _matches_cache["data"] = matches
+        _matches_cache["timestamp"] = now
+        return jsonify({
+            "success": True,
+            "cached": False,
+            "cached_at": now,
+            "count": len(matches),
+            "matches": matches,
+        })
+    except requests.exceptions.RequestException as e:
+        # في حال فشل الطلب، أرجع آخر بيانات مخزنة إن وجدت بدل الفشل الكامل
+        if _matches_cache["data"] is not None:
+            return jsonify({
+                "success": True,
+                "cached": True,
+                "stale": True,
+                "error": str(e),
+                "cached_at": _matches_cache["timestamp"],
+                "count": len(_matches_cache["data"]),
+                "matches": _matches_cache["data"],
+            })
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "matches": [],
+        }), 502
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
