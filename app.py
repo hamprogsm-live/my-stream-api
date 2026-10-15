@@ -1,268 +1,163 @@
 import os
 import time
 import requests
-from datetime import datetime
-from flask import Flask, render_template_string, make_response, jsonify, request
+from datetime import datetime, timedelta, timezone
+from flask import Flask, jsonify, request
 
 app = Flask(__name__)
 
-# ==============================
-# إعدادات API-FOOTBALL
-# ==============================
-# يفضل وضع المفتاح كمتغير بيئة (Environment Variable) باسم API_FOOTBALL_KEY
-# بدلاً من كتابته مباشرة في الكود، لكن تم توفير قيمة افتراضية هنا للتجربة السريعة.
-API_FOOTBALL_KEY = os.environ.get("API_FOOTBALL_KEY", "e443b3250a452e23de6a392ea2b22d75")
-API_FOOTBALL_BASE_URL = "https://v3.football.api-sports.io"
 
-# البطولات الكبرى فقط (يمكنك إضافة/حذف حسب رغبتك)
-# مصدر المعرفات: https://www.api-football.com/documentation-v3#tag/Leagues
-MAJOR_LEAGUES = {
-    1: "كأس العالم",
-    2: "دوري أبطال أوروبا",
-    3: "الدوري الأوروبي",
-    39: "الدوري الإنجليزي الممتاز",
-    140: "الدوري الإسباني",
-    135: "الدوري الإيطالي",
-    78: "الدوري الألماني",
-    61: "الدوري الفرنسي",
-    45: "كأس الاتحاد الإنجليزي",
-    848: "دوري المؤتمر الأوروبي",
+@app.after_request
+def add_cors_headers(response):
+    """يسمح لأي صفحة ويب (مثل واجهتك الأمامية) بجلب البيانات من هذا الـ API."""
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+    return response
+
+
+# ==============================
+# إعدادات football-data.org
+# ==============================
+# يفضل وضع المفتاح كمتغير بيئة (Environment Variable) باسم FOOTBALL_DATA_TOKEN
+# بدلاً من كتابته مباشرة في الكود، لكن تم توفير قيمة افتراضية هنا للتجربة السريعة.
+FOOTBALL_DATA_TOKEN = os.environ.get("FOOTBALL_DATA_TOKEN", "a716c5d5b9614ff89f550e0642fef54d")
+FOOTBALL_DATA_BASE_URL = "https://api.football-data.org/v4"
+
+# البطولات الـ 12 المتاحة على الخطة المجانية لـ football-data.org
+# (رمز كل بطولة + اسمها بالعربية)
+COMPETITIONS = {
+    "WC": "كأس العالم",
+    "CL": "دوري أبطال أوروبا",
+    "EC": "بطولة أمم أوروبا",
+    "PL": "الدوري الإنجليزي الممتاز",
+    "PD": "الدوري الإسباني",
+    "SA": "الدوري الإيطالي",
+    "BL1": "الدوري الألماني",
+    "FL1": "الدوري الفرنسي",
+    "PPL": "الدوري البرتغالي",
+    "DED": "الدوري الهولندي",
+    "ELC": "التشامبيونشيب الإنجليزي",
+    "BSA": "الدوري البرازيلي",
+}
+COMPETITIONS_PARAM = ",".join(COMPETITIONS.keys())
+
+# تطبيع حالات المباراة القادمة من football-data.org إلى رموز بسيطة
+# يستخدمها الفرونت إند (نفس الأسلوب بغض النظر عن مزوّد البيانات)
+STATUS_MAP = {
+    "SCHEDULED": "NS",
+    "TIMED": "NS",
+    "IN_PLAY": "LIVE",
+    "PAUSED": "HT",
+    "FINISHED": "FT",
+    "POSTPONED": "PST",
+    "SUSPENDED": "SUSP",
+    "CANCELLED": "CANC",
+    "AWARDED": "AWD",
+}
+
+STATUS_LABELS_AR = {
+    "NS": "لم تبدأ بعد",
+    "LIVE": "مباشر الآن",
+    "HT": "استراحة",
+    "FT": "انتهت المباراة",
+    "PST": "مؤجلة",
+    "SUSP": "معلقة",
+    "CANC": "ملغاة",
+    "AWD": "محسومة",
 }
 
 # ==============================
 # كاش بسيط في الذاكرة (In-memory cache)
 # ==============================
 _matches_cache = {"data": None, "timestamp": 0}
-CACHE_TTL_SECONDS = 300  # 5 دقائق
+CACHE_TTL_SECONDS = 300  # 5 دقائق (طلب واحد فقط لكل تحديث، لا داعي لكاش أطول)
 
 
-def fetch_today_major_matches():
-    """يجلب كل مباريات اليوم من API-FOOTBALL ثم يفلتر على البطولات الكبرى فقط."""
-    today = datetime.now().strftime("%Y-%m-%d")
+def parse_utc_timestamp(utc_date_str):
+    """يحوّل صيغة ISO8601 (مثل 2026-07-04T16:00:00Z) إلى unix timestamp."""
+    dt = datetime.strptime(utc_date_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    return int(dt.timestamp())
 
-    headers = {"x-apisports-key": API_FOOTBALL_KEY}
+
+def fetch_major_matches_3_days():
+    """
+    يجلب مباريات أمس + اليوم + غداً لكل البطولات الكبرى المتاحة على الخطة
+    المجانية لـ football-data.org، بطلب واحد فقط لتوفير حصة الاستخدام اليومية.
+    """
+    today_utc = datetime.now(timezone.utc).date()
+    date_from = today_utc - timedelta(days=1)   # أمس
+    date_to = today_utc + timedelta(days=2)     # غداً + 1 (dateTo غير شامل، راجع توثيق football-data.org)
+
+    headers = {"X-Auth-Token": FOOTBALL_DATA_TOKEN}
+    params = {
+        "dateFrom": date_from.strftime("%Y-%m-%d"),
+        "dateTo": date_to.strftime("%Y-%m-%d"),
+        "competitions": COMPETITIONS_PARAM,
+    }
+
     resp = requests.get(
-        f"{API_FOOTBALL_BASE_URL}/fixtures",
+        f"{FOOTBALL_DATA_BASE_URL}/matches",
         headers=headers,
-        params={"date": today},
+        params=params,
         timeout=10,
     )
     resp.raise_for_status()
     payload = resp.json()
 
     matches = []
-    for fixture in payload.get("response", []):
-        league_id = fixture["league"]["id"]
-        if league_id not in MAJOR_LEAGUES:
-            continue
+    for m in payload.get("matches", []):
+        competition = m.get("competition", {})
+        comp_code = competition.get("code")
+        league_name = COMPETITIONS.get(comp_code, competition.get("name", comp_code))
 
-        status = fixture["fixture"]["status"]
+        status_raw = m.get("status", "SCHEDULED")
+        status_short = STATUS_MAP.get(status_raw, "NS")
+
+        score = m.get("score", {}) or {}
+        full_time = score.get("fullTime", {}) or {}
+
+        home_team = m.get("homeTeam", {}) or {}
+        away_team = m.get("awayTeam", {}) or {}
+
         matches.append({
-            "id": fixture["fixture"]["id"],
-            "date": fixture["fixture"]["date"],
-            "timestamp": fixture["fixture"]["timestamp"],
-            "status_short": status["short"],       # e.g. NS, 1H, HT, FT, LIVE
-            "status_long": status["long"],
-            "elapsed": status["elapsed"],
-            "home_team": fixture["teams"]["home"]["name"],
-            "away_team": fixture["teams"]["away"]["name"],
-            "home_logo": fixture["teams"]["home"]["logo"],
-            "away_logo": fixture["teams"]["away"]["logo"],
-            "home_score": fixture["goals"]["home"],
-            "away_score": fixture["goals"]["away"],
-            "league_id": league_id,
-            "league_name": MAJOR_LEAGUES[league_id],
-            "league_logo": fixture["league"]["logo"],
-            "round": fixture["league"]["round"],
+            "id": m.get("id"),
+            "date": m.get("utcDate"),
+            "timestamp": parse_utc_timestamp(m["utcDate"]),
+            "status_short": status_short,
+            "status_long": STATUS_LABELS_AR.get(status_short, status_raw),
+            "elapsed": m.get("minute"),
+            "home_team": home_team.get("name") or home_team.get("shortName"),
+            "away_team": away_team.get("name") or away_team.get("shortName"),
+            "home_logo": home_team.get("crest"),
+            "away_logo": away_team.get("crest"),
+            "home_score": full_time.get("home"),
+            "away_score": full_time.get("away"),
+            "league_id": comp_code,
+            "league_name": league_name,
+            "league_logo": competition.get("emblem"),
+            "round": f"الجولة {m.get('matchday')}" if m.get("matchday") else m.get("stage"),
         })
 
-    # ترتيب حسب التوقيت
-    matches.sort(key=lambda m: m["timestamp"])
+    matches.sort(key=lambda x: x["timestamp"])
     return matches
 
-# بيانات المباريات مطابقة تماماً للصور التي رفعتها
-MATCHES_DATA = [
-    {
-        "status": "time", "time": "08:00 PM",
-        "home_team": "فرنسا", "away_team": "السنغال",
-        "home_flag": "🇫🇷", "away_flag": "🇸🇳",
-        "competition": "كأس العالم", "commentator": "حسن العيدروس", "channel": "beIN MAX 1"
-    },
-    {
-        "status": "time", "time": "11:00 PM",
-        "home_team": "العراق", "away_team": "النرويج",
-        "home_flag": "🇮🇶", "away_flag": "🇳🇴",
-        "competition": "كأس العالم", "commentator": "عصام الشوالي", "channel": "beIN MAX 2"
-    },
-    {
-        "status": "time", "time": "02:00 AM",
-        "home_team": "الأرجنتين", "away_team": "الجزائر",
-        "home_flag": "🇦🇷", "away_flag": "🇩🇿",
-        "competition": "كأس العالم", "commentator": "حفيظ دراجي", "channel": "beIN MAX 1"
-    },
-    {
-        "status": "time", "time": "05:00 AM",
-        "home_team": "النمسا", "away_team": "الأردن",
-        "home_flag": "🇦🇹", "away_flag": "🇯🇴",
-        "competition": "كأس العالم", "commentator": "خليل البلوشي", "channel": "beIN MAX 2"
-    },
-    {
-        "status": "finished", "time": "إنتهت المباراة",
-        "home_team": "إيران", "away_team": "نيو زيلندا",
-        "home_flag": "🇮🇷", "away_flag": "🇳🇿",
-        "competition": "كأس العالم", "commentator": "عامر الخوذيري", "channel": "beIN MAX 2"
-    }
-]
-
-HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>LIVE EVENT</title>
-    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@600;700&display=swap" rel="stylesheet">
-    <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Cairo', sans-serif; }
-        body { background-color: #f4f4f4; padding-bottom: 30px; -webkit-user-select: none; user-select: none; }
-        
-        /* البار العلوي الأحمر */
-        .top-bar {
-            background-color: #D31515;
-            color: white;
-            text-align: center;
-            padding: 20px 0;
-            font-size: 22px;
-            font-weight: bold;
-            position: sticky;
-            top: 0;
-            z-index: 100;
-            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
-        }
-        
-        .container { max-width: 550px; margin: 0 auto; padding: 15px; }
-        
-        /* الكروت */
-        .match-card {
-            background: #FFFFFF;
-            border: 1.5px solid #E8E8E8;
-            border-radius: 14px;
-            margin-bottom: 18px;
-            padding: 18px;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.02);
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-        }
-        
-        .teams-row {
-            display: flex;
-            width: 100%;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 15px;
-        }
-        
-        .team { flex: 1; text-align: center; }
-        
-        .team-name { color: #B80000; font-size: 18px; font-weight: 700; margin-top: 8px; }
-        
-        /* الأعلام الدائرية الذكية */
-        .flag {
-            width: 65px;
-            height: 65px;
-            border-radius: 50%;
-            background: #fdfdfd;
-            margin: 0 auto;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 35px;
-            box-shadow: 0 2px 6px rgba(0,0,0,0.1);
-            border: 1px solid #eee;
-        }
-        
-        /* التوقيت */
-        .match-time {
-            background-color: #EEEEEE;
-            color: #333333;
-            padding: 8px 18px;
-            border-radius: 20px;
-            font-size: 15px;
-            font-weight: bold;
-            min-width: 115px;
-            text-align: center;
-            direction: ltr;
-        }
-        
-        .finished { color: #D31515; font-size: 14px; font-weight: bold; direction: rtl; }
-        
-        /* التفاصيل السفلى */
-        .match-info { width: 100%; border-top: 1px dashed #E8E8E8; padding-top: 12px; text-align: center; }
-        
-        .competition { color: #555555; font-size: 14px; font-weight: bold; margin-bottom: 8px; display: flex; align-items: center; justify-content: center; gap: 5px; }
-        
-        .meta-data { display: flex; justify-content: space-around; color: #777777; font-size: 13px; }
-        
-        .meta-item { display: flex; align-items: center; gap: 5px; }
-    </style>
-</head>
-<body>
-
-    <div class="top-bar">LIVE EVENT</div>
-
-    <div class="container">
-        {% for match in matches %}
-        <div class="match-card">
-            <div class="teams-row">
-                <div class="team">
-                    <div class="flag">{{ match.home_flag }}</div>
-                    <div class="team-name">{{ match.home_team }}</div>
-                </div>
-                
-                <div class="match-time {% if match.status == 'finished' %}finished{% endif %}">
-                    {{ match.time }}
-                </div>
-                
-                <div class="team">
-                    <div class="flag">{{ match.away_flag }}</div>
-                    <div class="team-name">{{ match.away_team }}</div>
-                </div>
-            </div>
-            
-            <div class="match-info">
-                <div class="competition">🏆 {{ match.competition }}</div>
-                <div class="meta-data">
-                    <div class="meta-item">🎙️ {{ match.commentator }}</div>
-                    <div class="meta-item">📺 {{ match.channel }}</div>
-                </div>
-            </div>
-        </div>
-        {% endfor %}
-    </div>
-
-</body>
-</html>
-"""
 
 @app.route('/')
-def index():
-    rendered_html = render_template_string(HTML_TEMPLATE, matches=MATCHES_DATA)
-    response = make_response(rendered_html)
-    
-    # فك الحظر تماماً ليعمل الـ iframe في تطبيقك ومحرر الأكواد
-    response.headers['X-Frame-Options'] = 'ALLOWALL'
-    response.headers['Content-Security-Policy'] = "frame-ancestors *;"
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    
-    return response
+def home():
+    return jsonify({
+        "status": "ok",
+        "message": "Matches summary API is running (football-data.org)",
+        "endpoints": ["/api/matches"],
+    })
 
 
 @app.route('/api/matches')
 def api_matches():
     """
-    يرجع مباريات اليوم للبطولات الكبرى فقط (كأس العالم، أبطال أوروبا، الدوريات الكبرى...).
-    نتائج مخزنة مؤقتاً (كاش) لمدة CACHE_TTL_SECONDS لتقليل عدد الطلبات على API-FOOTBALL.
+    يرجع مباريات أمس + اليوم + غداً للبطولات الكبرى فقط
+    (كأس العالم، أبطال أوروبا، الدوريات الأوروبية الكبرى، الدوري البرازيلي...).
+    نتائج مخزنة مؤقتاً (كاش) لمدة CACHE_TTL_SECONDS لتقليل عدد الطلبات.
     استخدم ?refresh=1 لإجبار تحديث الكاش.
     """
     now = time.time()
@@ -282,9 +177,10 @@ def api_matches():
         })
 
     try:
-        matches = fetch_today_major_matches()
+        matches = fetch_major_matches_3_days()
         _matches_cache["data"] = matches
         _matches_cache["timestamp"] = now
+        print(f"[matches] fetched {len(matches)} major-league fixtures (yesterday/today/tomorrow)", flush=True)
         return jsonify({
             "success": True,
             "cached": False,
@@ -313,4 +209,4 @@ def api_matches():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port, debug=False)
